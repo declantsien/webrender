@@ -2,19 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-extern crate euclid;
-extern crate gleam;
-extern crate glutin;
-extern crate webrender;
-extern crate winit;
-
 use gleam::gl;
-use glutin::NotCurrent;
 use std::fs::File;
 use std::io::Read;
+use std::rc::Rc;
 use webrender::api::*;
 use webrender::api::units::*;
 use webrender::render_api::*;
+use webrender::FastHashMap;
 use webrender::DebugFlags;
 use winit::dpi::LogicalSize;
 use winit::platform::run_return::EventLoopExtRunReturn;
@@ -51,9 +46,11 @@ impl RenderNotifier for Notifier {
 }
 
 struct Window {
-    events_loop: winit::event_loop::EventLoop<()>, //TODO: share events loop?
-    context: Option<glutin::WindowedContext<NotCurrent>>,
-    renderer: webrender::Renderer,
+    window: winit::window::Window,
+    context: surfman::Context,
+    device: surfman::Device,
+    gl: Rc<dyn gl::Gl>,
+    renderer: Option<webrender::Renderer>,
     name: &'static str,
     pipeline_id: PipelineId,
     document_id: DocumentId,
@@ -62,31 +59,60 @@ struct Window {
     font_instance_key: FontInstanceKey,
 }
 
+impl Drop for Window {
+    fn drop(&mut self) {
+        self.device.destroy_context(&mut self.context).unwrap();
+        self.renderer.take().unwrap().deinit();
+    }
+}
+
 impl Window {
-    fn new(name: &'static str, clear_color: ColorF) -> Self {
-        let events_loop = winit::event_loop::EventLoop::new();
+    fn new(event_loop: &winit::event_loop::EventLoop<()>, name: &'static str, clear_color: ColorF) -> Self {
         let window_builder = winit::window::WindowBuilder::new()
             .with_title(name)
-            .with_inner_size(LogicalSize::new(800. as f64, 600. as f64));
-        let context = glutin::ContextBuilder::new()
-            .with_gl(glutin::GlRequest::GlThenGles {
-                opengl_version: (3, 2),
-                opengles_version: (3, 0),
-            })
-            .build_windowed(window_builder, &events_loop)
-            .unwrap();
+            .with_inner_size(LogicalSize::new(800., 600.));
+        let window = window_builder.build(event_loop).unwrap();
 
-        let context = unsafe { context.make_current().unwrap() };
-
-        let gl = match context.get_api() {
-            glutin::Api::OpenGl => unsafe {
-                gl::GlFns::load_with(|symbol| context.get_proc_address(symbol) as *const _)
-            },
-            glutin::Api::OpenGlEs => unsafe {
-                gl::GlesFns::load_with(|symbol| context.get_proc_address(symbol) as *const _)
-            },
-            glutin::Api::WebGl => unimplemented!(),
+        let connection = surfman::Connection::from_winit_window(&window).unwrap();
+        let widget = connection.create_native_widget_from_winit_window(&window).unwrap();
+        let adapter = connection.create_adapter().unwrap();
+        let mut device = connection.create_device(&adapter).unwrap();
+        let (major, minor) = match device.gl_api() {
+            surfman::GLApi::GL => (3, 2),
+            surfman::GLApi::GLES => (3, 0),
         };
+        let context_descriptor = device.create_context_descriptor(&surfman::ContextAttributes {
+            version: surfman::GLVersion {
+                major,
+                minor,
+            },
+            flags: surfman::ContextAttributeFlags::ALPHA |
+            surfman::ContextAttributeFlags::DEPTH |
+            surfman::ContextAttributeFlags::STENCIL,
+        }).unwrap();
+        let mut context = device.create_context(&context_descriptor, None).unwrap();
+        device.make_context_current(&context).unwrap();
+
+        let gl = match device.gl_api() {
+            surfman::GLApi::GL => unsafe {
+                gl::GlFns::load_with(
+                    |symbol| device.get_proc_address(&context, symbol) as *const _
+                )
+            },
+            surfman::GLApi::GLES => unsafe {
+                gl::GlesFns::load_with(
+                    |symbol| device.get_proc_address(&context, symbol) as *const _
+                )
+            },
+        };
+        let gl = gl::ErrorCheckingGl::wrap(gl);
+
+        let surface = device.create_surface(
+            &context,
+            surfman::SurfaceAccess::GPUOnly,
+            surfman::SurfaceType::Widget { native_widget: widget },
+        ).unwrap();
+        device.bind_surface_to_context(&mut context, surface).unwrap();
 
         let opts = webrender::WebRenderOptions {
             clear_color,
@@ -94,12 +120,12 @@ impl Window {
         };
 
         let device_size = {
-            let size = context
-                .window()
+            let size = window
                 .inner_size();
+
             DeviceIntSize::new(size.width as i32, size.height as i32)
         };
-        let notifier = Box::new(Notifier::new(events_loop.create_proxy()));
+        let notifier = Box::new(Notifier::new(event_loop.create_proxy()));
         let (renderer, sender) = webrender::create_webrender_instance(gl.clone(), notifier, opts, None).unwrap();
         let mut api = sender.create_api();
         let document_id = api.add_document(device_size);
@@ -118,63 +144,39 @@ impl Window {
         api.send_transaction(document_id, txn);
 
         Window {
-            events_loop,
-            context: Some(unsafe { context.make_not_current().unwrap() }),
-            renderer,
+            window,
+            device,
+            context,
+            renderer: Some(renderer),
             name,
             epoch,
             pipeline_id,
             document_id,
             api,
             font_instance_key,
+            gl,
         }
     }
 
-    fn tick(&mut self) -> bool {
-        let mut do_exit = false;
-        let my_name = &self.name;
-        let renderer = &mut self.renderer;
+    pub fn id(&self) -> winit::window::WindowId {
+        self.window.id()
+    }
+
+    fn set_flags(&mut self) {
+        println!("set flags {}", &self.name);
+        self.api.send_debug_cmd(DebugCommand::SetFlags(DebugFlags::PROFILER_DBG));
+    }
+
+    fn redraw(&mut self) {
+        let renderer = self.renderer.as_mut().unwrap();
         let api = &mut self.api;
 
-        self.events_loop.run_return(|global_event, _elwt, control_flow| {
-            *control_flow = winit::event_loop::ControlFlow::Exit;
-            match global_event {
-                winit::event::Event::WindowEvent { event, .. } => match event {
-                    winit::event::WindowEvent::CloseRequested |
-                    winit::event::WindowEvent::KeyboardInput {
-                        input: winit::event::KeyboardInput {
-                            virtual_keycode: Some(winit::event::VirtualKeyCode::Escape),
-                            ..
-                        },
-                        ..
-                    } => {
-                        do_exit = true
-                    }
-                    winit::event::WindowEvent::KeyboardInput {
-                        input: winit::event::KeyboardInput {
-                            state: winit::event::ElementState::Pressed,
-                            virtual_keycode: Some(winit::event::VirtualKeyCode::P),
-                            ..
-                        },
-                        ..
-                    } => {
-                        println!("set flags {}", my_name);
-                        api.send_debug_cmd(DebugCommand::SetFlags(DebugFlags::PROFILER_DBG))
-                    }
-                    _ => {}
-                }
-                _ => {}
-            }
-        });
-        if do_exit {
-            return true
-        }
+        self.device.make_context_current(&self.context).unwrap();
 
-        let context = unsafe { self.context.take().unwrap().make_current().unwrap() };
-        let device_pixel_ratio = context.window().scale_factor() as f32;
+        let device_pixel_ratio = self.window.scale_factor() as f32;
         let device_size = {
-            let size = context
-                .window()
+            let size = self
+                .window
                 .inner_size();
             DeviceIntSize::new(size.width as i32, size.height as i32)
         };
@@ -282,35 +284,69 @@ impl Window {
         txn.generate_frame(0, RenderReasons::empty());
         api.send_transaction(self.document_id, txn);
 
+        let framebuffer_object = self
+            .device
+            .context_surface_info(&self.context)
+            .unwrap()
+            .unwrap()
+            .framebuffer_object;
+        self.gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
+        assert_eq!(self.gl.check_frame_buffer_status(gleam::gl::FRAMEBUFFER), gl::FRAMEBUFFER_COMPLETE);
+
         renderer.update();
         renderer.render(device_size, 0).unwrap();
-        context.swap_buffers().ok();
 
-        self.context = Some(unsafe { context.make_not_current().unwrap() });
-
-        false
-    }
-
-    fn deinit(self) {
-        self.renderer.deinit();
+        let mut surface = self.device.unbind_surface_from_context(&mut self.context).unwrap().unwrap();
+        self.device.present_surface(&self.context, &mut surface).unwrap();
+        self.device.bind_surface_to_context(&mut self.context, surface).unwrap();
     }
 }
 
 fn main() {
-    let mut win1 = Window::new("window1", ColorF::new(0.3, 0.0, 0.0, 1.0));
-    let mut win2 = Window::new("window2", ColorF::new(0.0, 0.3, 0.0, 1.0));
+    let mut event_loop = winit::event_loop::EventLoop::new();
+    let mut windows = FastHashMap::default();
 
-    loop {
-        if win1.tick() {
-            break;
-        }
-        if win2.tick() {
-            break;
-        }
-    }
+    let win1 = Window::new(&event_loop, "window1", ColorF::new(0.3, 0.0, 0.0, 1.0));
+    let win1_id = win1.id();
+    windows.insert(win1_id, win1);
+    let win2 = Window::new(&event_loop, "window2", ColorF::new(0.0, 0.3, 0.0, 1.0));
+    let win2_id = win2.id();
+    windows.insert(win2_id, win2);
 
-    win1.deinit();
-    win2.deinit();
+    event_loop.run_return(|global_event, _elwt, control_flow| {
+        *control_flow = winit::event_loop::ControlFlow::Wait;
+        match global_event {
+            winit::event::Event::WindowEvent { window_id, event, .. } => match event {
+                winit::event::WindowEvent::CloseRequested |
+                    winit::event::WindowEvent::KeyboardInput {
+                        input: winit::event::KeyboardInput {
+                            virtual_keycode: Some(winit::event::VirtualKeyCode::Escape),
+                            ..
+                        },
+                        ..
+                    } => {
+                        *control_flow = winit::event_loop::ControlFlow::Exit;
+                    }
+                winit::event::WindowEvent::KeyboardInput {
+                    input: winit::event::KeyboardInput {
+                        state: winit::event::ElementState::Pressed,
+                        virtual_keycode: Some(winit::event::VirtualKeyCode::P),
+                        ..
+                    },
+                    ..
+                } => {
+                    let window: &mut Window = windows.get_mut(&window_id).unwrap();
+                    window.set_flags();
+                }
+                _ => {}
+            },
+            winit::event::Event::RedrawRequested(window_id) => {
+                let window: &mut Window = windows.get_mut(&window_id).unwrap();
+                window.redraw();
+            }
+            _ => {}
+        }
+    });
 }
 
 fn load_file(name: &str) -> Vec<u8> {

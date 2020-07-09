@@ -3,7 +3,6 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use gleam::gl;
-use glutin;
 use std::env;
 use std::path::PathBuf;
 use webrender;
@@ -128,35 +127,55 @@ pub fn main_wrapper<E: Example>(
     let mut events_loop = winit::event_loop::EventLoop::new();
     let window_builder = winit::window::WindowBuilder::new()
         .with_title(E::TITLE)
+        // .with_multitouch()
         .with_inner_size(winit::dpi::LogicalSize::new(E::WIDTH as f64, E::HEIGHT as f64));
-    let windowed_context = glutin::ContextBuilder::new()
-        .with_gl(glutin::GlRequest::GlThenGles {
-            opengl_version: (3, 2),
-            opengles_version: (3, 0),
-        })
-        .build_windowed(window_builder, &events_loop)
-        .unwrap();
+    let window = window_builder.build(&events_loop).unwrap();
 
-    let windowed_context = unsafe { windowed_context.make_current().unwrap() };
-
-    let gl = match windowed_context.get_api() {
-        glutin::Api::OpenGl => unsafe {
-            gl::GlFns::load_with(
-                |symbol| windowed_context.get_proc_address(symbol) as *const _
-            )
-        },
-        glutin::Api::OpenGlEs => unsafe {
-            gl::GlesFns::load_with(
-                |symbol| windowed_context.get_proc_address(symbol) as *const _
-            )
-        },
-        glutin::Api::WebGl => unimplemented!(),
+    let connection = surfman::Connection::from_winit_window(&window).unwrap();
+    let widget = connection.create_native_widget_from_winit_window(&window).unwrap();
+    let adapter = connection.create_adapter().unwrap();
+    let mut device = connection.create_device(&adapter).unwrap();
+    let (major, minor) = match device.gl_api() {
+        surfman::GLApi::GL => (3, 2),
+        surfman::GLApi::GLES => (3, 0),
     };
+    let context_descriptor = device.create_context_descriptor(&surfman::ContextAttributes {
+        version: surfman::GLVersion {
+            major,
+            minor,
+        },
+        flags: surfman::ContextAttributeFlags::ALPHA |
+        surfman::ContextAttributeFlags::DEPTH |
+        surfman::ContextAttributeFlags::STENCIL,
+    }).unwrap();
+    let mut context = device.create_context(&context_descriptor, None).unwrap();
+    device.make_context_current(&context).unwrap();
+
+    let gl = match device.gl_api() {
+        surfman::GLApi::GL => unsafe {
+            gl::GlFns::load_with(
+                |symbol| device.get_proc_address(&context, symbol) as *const _
+            )
+        },
+        surfman::GLApi::GLES => unsafe {
+            gl::GlesFns::load_with(
+                |symbol| device.get_proc_address(&context, symbol) as *const _
+            )
+        },
+    };
+    let gl = gl::ErrorCheckingGl::wrap(gl);
 
     println!("OpenGL version {}", gl.get_string(gl::VERSION));
     println!("Shader resource path: {:?}", res_path);
-    let device_pixel_ratio = windowed_context.window().scale_factor() as f32;
+    let device_pixel_ratio = window.scale_factor() as f32;
     println!("Device pixel ratio: {}", device_pixel_ratio);
+
+    let surface = device.create_surface(
+        &context,
+        surfman::SurfaceAccess::GPUOnly,
+        surfman::SurfaceType::Widget { native_widget: widget },
+    ).unwrap();
+    device.bind_surface_to_context(&mut context, surface).unwrap();
 
     println!("Loading shaders...");
     let mut debug_flags = DebugFlags::ECHO_DRIVER_MESSAGES | DebugFlags::TEXTURE_CACHE_DBG;
@@ -170,8 +189,7 @@ pub fn main_wrapper<E: Example>(
     };
 
     let device_size = {
-        let size = windowed_context
-            .window()
+        let size = window
             .inner_size();
         DeviceIntSize::new(size.width as i32, size.height as i32)
     };
@@ -232,7 +250,7 @@ pub fn main_wrapper<E: Example>(
             winit::event::WindowEvent::CursorMoved { .. } => {
                 custom_event = example.on_event(
                     win_event,
-                    windowed_context.window(),
+                    &window,
                     &mut api,
                     document_id,
                 );
@@ -272,7 +290,7 @@ pub fn main_wrapper<E: Example>(
                 _ => {
                     custom_event = example.on_event(
                         win_event,
-                        windowed_context.window(),
+                        &window,
                         &mut api,
                         document_id,
                     )
@@ -280,7 +298,7 @@ pub fn main_wrapper<E: Example>(
             },
             other => custom_event = example.on_event(
                 other,
-                windowed_context.window(),
+                &window,
                 &mut api,
                 document_id,
             ),
@@ -310,14 +328,27 @@ pub fn main_wrapper<E: Example>(
         }
         api.send_transaction(document_id, txn);
 
+        let framebuffer_object = device
+            .context_surface_info(&context)
+            .unwrap()
+            .unwrap()
+            .framebuffer_object;
+        gl.bind_framebuffer(gl::FRAMEBUFFER, framebuffer_object);
+        assert_eq!(gl.check_frame_buffer_status(gleam::gl::FRAMEBUFFER), gl::FRAMEBUFFER_COMPLETE);
+
         renderer.update();
         renderer.render(device_size, 0).unwrap();
         let _ = renderer.flush_pipeline_info();
         example.draw_custom(&*gl);
-        windowed_context.swap_buffers().ok();
+
+        let mut surface = device.unbind_surface_from_context(&mut context).unwrap().unwrap();
+        device.present_surface(&context, &mut surface).unwrap();
+        device.bind_surface_to_context(&mut context, surface).unwrap();
 
         *control_flow = winit::event_loop::ControlFlow::Wait;
     });
 
     renderer.deinit();
+
+    device.destroy_context(&mut context).unwrap();
 }

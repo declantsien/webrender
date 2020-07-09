@@ -57,11 +57,11 @@ debug = ["webrender/capture", "webrender/profiler"]
 app_units = "0.7"
 env_logger = { version = "0.10", default_features = false }
 euclid = "0.22"
-gleam = "0.15"
-glutin = "0.28"
+gleam = "0.15.0"
 rayon = "1"
 webrender = { path = "../webrender" }
-winit = "0.26"
+winit = "0.28"
+surfman = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.7"
