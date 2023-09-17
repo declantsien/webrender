@@ -9,7 +9,7 @@ license = "MPL-2.0"
 webrender = { path = "../../webrender" }
 gleam = "0.15"
 
-[target.'cfg(windows)'.dependencies]
+[target.'cfg(target_os = "windows")'.dependencies]
 compositor-windows = { path = "../compositor-windows" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
