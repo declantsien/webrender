@@ -135,7 +135,7 @@ fn main() {
     let el = EventLoop::new();
     let wb = WindowBuilder::new()
         .with_title("A fantastic window!")
-        .with_inner_size(PhysicalSize::new(1900. as f64, 1300. as f64));
+        .with_inner_size(PhysicalSize::new(1900./2 as f64, 1300./2 as f64));
 
     let windowed_context = ContextBuilder::new()
         .with_gl(glutin::GlRequest::GlThenGles {
