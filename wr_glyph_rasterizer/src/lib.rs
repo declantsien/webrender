@@ -64,9 +64,16 @@ pub mod platform {
 pub mod backend {
     #[cfg(feature = "backend_swash")]
     pub use crate::backend::swash::font;
+    #[cfg(feature = "backend_fontdue")]
+    pub use crate::backend::fontdue::font;
 
     #[cfg(feature = "backend_swash")]
     pub mod swash {
+        pub mod font;
+    }
+
+    #[cfg(feature = "backend_fontdue")]
+    pub mod fontdue {
         pub mod font;
     }
 }

@@ -48,6 +48,7 @@ default = [ "env_logger" ]
 headless = [ "osmesa-sys", "osmesa-src" ]
 software = [ "swgl" ]
 font_backend_swash = [ "webrender/font_backend_swash" ]
+font_backend_fontdue = [ "webrender/font_backend_fontdue" ]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 dwrote = "0.11"
