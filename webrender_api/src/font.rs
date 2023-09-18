@@ -5,7 +5,7 @@
 use peek_poke::PeekPoke;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-#[cfg(all(not(feature = "font_backend_swash"), not(target_os = "macos")))]
+#[cfg(all(not(feature = "font_backend_swash"), not(feature = "font_backend_fontdue"), not(target_os = "macos")))]
 use std::path::PathBuf;
 use std::sync::Arc;
 // local imports
@@ -57,14 +57,14 @@ impl FontSize {
 #[derive(Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NativeFontHandle(pub u32);
 
-#[cfg(all(not(feature = "font_backend_swash"), not(target_os = "macos")))]
+#[cfg(all(not(feature = "font_backend_swash"), not(feature = "font_backend_fontdue"), not(target_os = "macos")))]
 #[derive(Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NativeFontHandle {
     pub path: PathBuf,
     pub index: u32,
 }
 
-#[cfg(all(not(feature = "font_backend_swash"), target_os = "macos"))]
+#[cfg(all(not(feature = "font_backend_swash"), not(feature = "font_backend_fontdue"), target_os = "macos"))]
 #[derive(Clone, Debug, Hash, Eq, PartialEq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NativeFontHandle {
     pub name: String,

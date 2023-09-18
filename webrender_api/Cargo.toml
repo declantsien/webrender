@@ -13,6 +13,7 @@ serialize = []
 deserialize = []
 display_list_stats = []
 font_backend_swash = []
+font_backend_fontdue = []
 
 [dependencies]
 app_units = "0.7.3"
