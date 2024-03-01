@@ -189,6 +189,7 @@ impl FontContext {
                 },
             data: pixels,
             content,
+            scale,
             ..
         } = glyph_image.unwrap();
 
@@ -231,7 +232,7 @@ impl FontContext {
             top: top as f32,
             width: width as i32,
             height: height as i32,
-            scale: 1.0,
+            scale,
             format,
             bytes: bgra_pixels,
         })
